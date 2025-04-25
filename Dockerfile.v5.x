@@ -1,5 +1,5 @@
 # rebased/repackaged base image that only updates existing packages
-ARG BASE=ubuntu:latest
+ARG BASE=ubuntu:20.04
 FROM ${BASE}
 LABEL maintainer="Eugene Volchek <eugene.volchek@gmail.com>"
 LABEL org.opencontainers.image.source="https://github.com/evolchek/docker-omada-controller"
