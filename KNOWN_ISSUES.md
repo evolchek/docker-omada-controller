@@ -12,6 +12,8 @@
     * [Incorrect CMD](#incorrect-cmd)
     * [5.12 - Unable to Login After Upgrade](#512---unable-to-login-after-upgrade)
     * [Slowness in Safari](#slowness-in-safari)
+    * [5.14 - Controller Unable to Start](#514---controller-unable-to-start)
+    * [5.15 - Controller Unable to Start](#515---controller-unable-to-start)
 
 ## Containerization Issues
 
@@ -20,6 +22,8 @@
 While MongoDB is fairly robust, the persistent data can become corrupt if a clean shutdown isn't performed. By default, Docker only waits 10 seconds before killing the container processes when using `docker stop...`. I would **highly recommend** performing a stop with a large timeout value, such as `docker stop -t 30...` to ensure that the controller is cleanly shut down. This value may need to be even larger for low powered devices, such as a Raspberry Pi.
 
 ### Notes for `armv7l`
+
+** ⚠ Deprecation and Removal Notice ⚠** - armv7l images will no longer be available starting with the v5.15.20 and later versions. See [this issue](https://github.com/mbentley/docker-omada-controller/issues/542) describing the change. The last version that will be available for `armv7l` is `5.15.8.2`.
 
 **tl;dr** - Do not run the Omada Controller on your `armv7l`/`armhf` (32 bit arm) based operating system! If you're running as Raspberry Pi 3, 4, Pi Zero 2W, you should [run a 64 bit operating system](https://www.raspberrypi.com/news/raspberry-pi-os-64-bit/) so you can use the `arm64` image which is supported. At any time, TP-Link can break compatibility with 32 bit arm and there will be no upgrade path forward! You have been warned!
 
@@ -71,3 +75,11 @@ There is a [known bug](https://github.com/mbentley/docker-omada-controller/discu
 ### Slowness in Safari
 
 In versions 5.8 to 5.12, it has been seen where Safari will take a significant amount of time to completely load a page in the controller web interface.  This is an [issue that has been reported upstream](https://community.tp-link.com/en/business/forum/topic/619304?replyId=1255404).
+
+### 5.14 - Controller Unable to Start
+
+Upon upgrade to 5.14, the controller may not start. You may see error messages that include phrases like: `Cannot retry start up springboot`, `Unsatisfied dependency expressed through field...`, `org.springframework.beans.factory.UnsatisfiedDependencyException`, among others. This is a problem with the controller software itself that TP-Link is aware of. If you're impacted, see the first post in [this issue](https://github.com/mbentley/docker-omada-controller/issues/418) for possible workaround instructions and more information. This issue should no longer be present on the latest 5.14 versions.
+
+### 5.15.6.x - Controller Unable to Start
+
+**Warning**: do **NOT** use this override environment variable unless you need it. It may cause unexpected issues in the future. Remove the environment variable if you're no longer running on 5.15.6.x. Upon upgrade to 5.15.6.x, the controller may not start. You may see error messages right around the `Valid radius server keystore is missing. Generating one ...` message that include phrases like: `Exception in thread "main" java.lang.NoSuchFieldError: id_alg_zlibCompress` among others. This is a problem with the controller software itself that TP-Link is aware of. If you're impacted, see the first post in [this issue](https://github.com/mbentley/docker-omada-controller/issues/509) for more information. An environment variable can be set as `WORKAROUND_509=true` on the container definition and it will delete two library files that are causing the issue.
