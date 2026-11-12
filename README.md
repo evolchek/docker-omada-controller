@@ -1,4 +1,114 @@
-# mbentley/omada-controller
+# evolchek/omada-controller
+
+A fork of [mbentley/docker-omada-controller](https://github.com/mbentley/docker-omada-controller) that builds TP-Link Omada from an explicit vendor download using the official Ubuntu base image.
+
+## Differences from upstream
+
+This comparison is against upstream commit [`3944052`](https://github.com/mbentley/docker-omada-controller/tree/39440529ea100637cf8f52fc3b5e64849c905af7). The current build targets **Omada 6.3.0.111 on Ubuntu 24.04, linux/amd64**. Upstream attribution and licensing are retained.
+
+| Area | This fork |
+| --- | --- |
+| Base image | Uses official `ubuntu:24.04` instead of `mbentley/ubuntu:24.04`. The main base is not pinned by digest; use `--pull` when rebuilding. |
+| Installer scope | Uses a version-specific installer for the exact archive in `build-inputs.env`. Other controller versions, ARM builds, beta archive formats and OpenJ9 selection are not supported by this installer. |
+| Omada download | Downloads directly from the recorded TP-Link URL, without contacting upstream's URL-resolution service. Checks SHA-256 before extraction. Updating Omada requires updating the version, URL and checksum together. |
+| Java | Installs OpenJDK 17 rather than upstream's Java 25 selection for Omada 6.3. |
+| MongoDB | Uses MongoDB's signed 8.0 APT repository and accepts its latest available patch when rebuilt. The downloaded repository signing-key file is checked against a fixed SHA-256. |
+| Runtime configuration | Treats the MongoDB URI as literal data instead of evaluating it as shell code. Quotes arguments in the generated MongoDB wrapper. `MONGOD_EXTRA_ARGS` accepts whitespace-separated literal arguments, without shell expansion. |
+| Permissions | Replaces world-writable properties with `0750` directories and `0640` files. Initializes properties, data and logs for UID/GID 508. Other rootless UIDs need appropriately owned writable directories. |
+| Build inventory | Includes `BUILD_INPUTS.env` and `PACKAGES.tsv` under `/opt/tplink/EAPController`, recording the selected inputs and installed OS package versions. |
+| MongoDB conversion helper | Uses official Ubuntu 20.04 for legacy binary compatibility, checks all downloaded archives, bounds waits, verifies FCV transitions, creates unique checked backups and attempts checked rollback while preserving failed files. The modified helper is amd64-only. |
+| Tests | Adds an isolated Compose setup, runtime configuration regression checks, and synthetic MongoDB upgrade/rollback integration tests. |
+
+The Omada archive and MongoDB key hashes pin downloaded bytes; they have not been verified against independent vendor signatures. Ubuntu packages and MongoDB 8.0 patches can change between rebuilds, so builds are not bit-for-bit reproducible. Retain the plain build log for the resolved base digest and inspect `PACKAGES.tsv` for installed versions.
+
+## Building this fork
+
+The public image is available on [Docker Hub](https://hub.docker.com/r/evolchek/omada-controller/tags) as `evolchek/omada-controller:6.3.0.111` for **linux/amd64**. The `6.3` and `6.3-amd64` aliases currently point to the same image.
+
+Build from source:
+
+```sh
+docker build --pull --progress plain --platform linux/amd64 \
+  -t evolchek/omada-controller:6.3.0.111 .
+```
+
+`INSTALL_VER` must match `OMADA_VERSION` in `build-inputs.env`; changing the build argument alone does not select another release. `NO_MONGODB=true` remains available for builds that use an external database.
+
+See [mongodb_upgrade/README.md](mongodb_upgrade/README.md) for the conversion helper. Its intermediate MongoDB binaries remain fixed; its Ubuntu 20.04 base is also pinned by digest.
+
+## Running tests
+
+Run these commands from the repository root using a local Docker context, after building the main image above or pulling the public image:
+
+```sh
+docker pull --platform linux/amd64 evolchek/omada-controller:6.3.0.111
+```
+
+The tests use synthetic or disposable data; no production volumes are needed. The MongoDB tests require amd64 with AVX available to the container; emulation on another architecture does not replace native hardware validation.
+
+### Runtime configuration regressions
+
+Checks literal MongoDB URI handling, extra-argument quoting and rejection of newline injection. The script also checks rejection of a changed payload by the checksum utility.
+
+```sh
+docker run --rm --platform linux/amd64 --network none \
+  --entrypoint bash -v "$PWD/tests:/tests:ro" \
+  evolchek/omada-controller:6.3.0.111 \
+  /tests/security-regressions.sh
+```
+
+### Controller startup and restart
+
+The test Compose file creates its own volumes and an internal network, with no published ports. Wait for the health check to succeed; startup may take several minutes under emulation. The manual health-check command exits nonzero until the controller is ready.
+
+```sh
+docker compose -p omada-review -f compose.test.yml up -d
+docker compose -p omada-review -f compose.test.yml ps
+docker compose -p omada-review -f compose.test.yml logs --tail 50 controller
+docker compose -p omada-review -f compose.test.yml exec -T controller /healthcheck.sh
+
+# Restart with the same disposable data, then wait and check health again.
+docker compose -p omada-review -f compose.test.yml restart controller
+docker compose -p omada-review -f compose.test.yml exec -T controller /healthcheck.sh
+
+# Remove only this test project's containers, network and disposable volumes.
+docker compose -p omada-review -f compose.test.yml down -v
+```
+
+### MongoDB upgrade and rollback
+
+Build the helper and the MongoDB 3.6 fixture, then run the integration script. It verifies that a test record survives conversion to FCV 8.0, and that an unsupported FCV 3.4 database fails and is restored with its original record and FCV. The script creates uniquely named volumes and removes them on exit. Legacy fixture/helper images are for testing and offline conversion only.
+
+```sh
+docker build --platform linux/amd64 \
+  -f mongodb_upgrade/Dockerfile.upgrade-amd64 \
+  -t evolchek/omada-controller:review-mongodb-upgrade mongodb_upgrade
+
+docker build --platform linux/amd64 \
+  -f tests/Dockerfile.mongo36-fixture \
+  -t omada-review-mongo36-fixture tests
+
+bash tests/mongodb-upgrade-integration.sh
+```
+
+### Script syntax
+
+```sh
+bash -n install.sh entrypoint-unified.sh mongodb_upgrade/upgrade.sh \
+  tests/security-regressions.sh tests/mongodb-upgrade-integration.sh
+```
+
+These tests do not establish device compatibility or successful restoration of a real controller backup. Scan each built image for dependency vulnerabilities separately from functional testing.
+
+## Deployment and compatibility notes
+
+For deployment, set `image: evolchek/omada-controller:6.3.0.111` (or the moving `6.3` alias) in the deployment configuration. Check the settings in `docker-compose.yml` before using it; the retained example references a 5.15 image. Use `compose.test.yml` for isolated testing with disposable volumes, an internal network and no published ports. Do not attach original MongoDB 3.6 data directly to MongoDB 8; preserve an independent cold backup and rehearse conversion on a disposable clone first.
+
+Legacy controller build files are not maintained on master. Upstream's optional Chromium build, ARM migration Dockerfile, OpenJ9 examples and Kubernetes examples remain in the repository but have not been adapted or validated for this fork. In particular, the retained ARM migration Dockerfile is not compatible with the modified amd64-only upgrade script.
+
+## Upstream reference documentation
+
+The following documentation is retained from upstream. Its published image tags, architecture support and general build examples describe **mbentley's images**, rather than the narrower build supported by this fork. Use the fork-specific build and test instructions above for this checkout.
 
 Docker image for [TP-Link Omada Software Controller](https://support.omadanetworks.com/us/product/omada-software-controller/) (also known as TP-Link Omada Network Application) to centrally manage [TP-Link Omada Hardware](https://www.omadanetworks.com/en/business-networking/all-omada/).
 
@@ -408,7 +518,7 @@ There are two sets of ports for the main controller (not including the specific 
 
 ### Running Rootless
 
-There is an optional ability to run the container in a rootless mode. This version has fewer pre-flight capabilities to do tasks like set permissions for you but works in environments where running containers as root is blocked (i.e. - many Kubernetes environments). To activate the [rootless entrypoint](entrypoint-rootless.sh) the following conditions must be met:
+There is an optional ability to run the container in a rootless mode. This version has fewer pre-flight capabilities to do tasks like set permissions for you but works in environments where running containers as root is blocked (i.e. - many Kubernetes environments). To activate the [rootless entrypoint](entrypoint-unified.sh) the following conditions must be met:
 
 * Set the environment variable `ROOTLESS` to `true`
 * Set the actual UID/GID of the container to be your desired values (they must be numerical)

@@ -1,7 +1,9 @@
+version: "3.1"
+
 services:
   omada-controller:
     container_name: omada-controller
-    image: evolchek/omada-controller:6.3
+    image: evolchek/omada-controller:5.15
     restart: unless-stopped
     ulimits:
       nofile:
@@ -16,19 +18,14 @@ services:
       - MANAGE_HTTPS_PORT=8043
       - PORTAL_HTTP_PORT=8088
       - PORTAL_HTTPS_PORT=8843
-      # UPGRADE_HTTPS_PORT defaults to 8043 (< 6.4) or 8044 (>= 6.4); only set it to override
-      # - UPGRADE_HTTPS_PORT=8043
-      - UPGRADE_ES_HTTPS_PORT=8044
       - PORT_APP_DISCOVERY=27001
-      - PORT_DISCOVERY=29810
-      - PORT_MANAGER_V1=29811
       - PORT_ADOPT_V1=29812
       - PORT_UPGRADE_V1=29813
+      - PORT_MANAGER_V1=29811
       - PORT_MANAGER_V2=29814
+      - PORT_DISCOVERY=29810
       - PORT_TRANSFER_V2=29815
       - PORT_RTTY=29816
-      - PORT_DEVICE_MONITOR=29817
-      - WEB_CONFIG_OVERRIDE=false
       - SHOW_SERVER_LOGS=true
       - SHOW_MONGODB_LOGS=false
       - SSL_CERT_NAME=tls.crt

@@ -1,448 +1,169 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Staged physical upgrade for a disposable cold MongoDB 3.6 clone only.
+set -Eeuo pipefail
 
-catch_error() {
-  echo -e "\nERROR: unexpected failure!"
+DATA=/opt/tplink/EAPController/data
+WAIT_SECONDS=${WAIT_SECONDS:-120}
+
+[[ "${WAIT_SECONDS}" =~ ^[1-9][0-9]*$ ]] || {
+  echo 'ERROR: invalid WAIT_SECONDS'
   exit 1
 }
-
-abort_and_rollback() {
-  echo -e "\nERROR: unexpected failure during upgrade!"
-
-  # only output if present
-  if [ -f /opt/tplink/EAPController/data/mongodb_upgrade.log ]
-  then
-    echo "INFO: outputting MongoDB logs (may provide hints as to what went wrong):"
-    cat /opt/tplink/EAPController/data/mongodb_upgrade.log
-  fi
-
-  echo -e "\nERROR: aborting MongoDB upgrade and rolling back!"
-
-  # check for mongod running
-  MONGOD_PROC="$(pgrep mongod)"
-
-  # if running, kill mongod
-  if [ -n "${MONGOD_PROC}" ]
-  then
-    # kill mongod
-    echo "INFO: killing mongod process..."
-    kill -9 "${MONGOD_PROC}"
-
-    # wait for mongod to be killed
-    while pgrep mongod > /dev/null
-    do
-      sleep .25
-    done
-    echo "done"
-  fi
-
-  # cleanup pid file, if present
-  if [ -f /opt/tplink/EAPController/data/mongo.pid ]
-  then
-    echo -n "INFO: cleaning up mongo.pid..."
-    rm /opt/tplink/EAPController/data/mongo.pid
-    echo "done"
-  fi
-
-  # make sure we actually have a backup
-  if [ -f /opt/tplink/EAPController/data/mongodb-preupgrade.tar ]
-  then
-    echo -n "INFO: rolling back to the backup of MongoDB prior to the upgrade..."
-    # roll back to the previous backup of mongodb
-    cd /opt/tplink/EAPController/data || catch_error
-
-    # remove partially upgraded db
-    rm -rf db
-
-    # restore backup
-    tar xf mongodb-preupgrade.tar
-    echo "done"
-
-    echo "INFO: the MongoDB backup file (mongodb-preupgrade.tar) is still in your persistent data directory in case you need it"
-  else
-    # this should never happen
-    echo "ERROR: there was no backup file (mongodb-preupgrade.tar) present; skipping rollback!"
-  fi
-
-  # output message about full logs, if present
-  if [ -f /opt/tplink/EAPController/data/mongodb_upgrade.log ]
-  then
-    echo "INFO: see /opt/tplink/EAPController/data/mongodb_upgrade.log for the full MongoDB logs"
-  fi
-
-  echo "INFO: successfully rolled back MongoDB using the pre-backup archive"
-  echo "INFO: you can safely start back up your v5 container if you need to get your controller back up and running at this point"
-  echo "INFO: if you require assistance, create a Help discussion (https://github.com/mbentley/docker-omada-controller/discussions/new?category=help) with as much information as possible"
-
-  # exit
+[ "${ACK_DISPOSABLE_CLONE:-}" = yes ] || {
+  echo 'ERROR: set ACK_DISPOSABLE_CLONE=yes only for a disposable cold clone'
   exit 1
 }
-
-run_db_repair() {
-  MESSAGE="${*}"
-
-  # run repair on db
-  echo -n "INFO: ${MESSAGE}..."
-  # shellcheck disable=SC2086
-  /tmp/mongod-${MONGO_VER} --dbpath /opt/tplink/EAPController/data/db -pidfilepath /opt/tplink/EAPController/data/mongo.pid --bind_ip 127.0.0.1 ${JOURNAL} --logpath /opt/tplink/EAPController/data/mongodb_upgrade.log --logappend --repair || abort_and_rollback
-  echo "done"
+[ "$(uname -m)" = x86_64 ] && grep -qE '^flags.* avx( .*|$)' /proc/cpuinfo || {
+  echo 'ERROR: native amd64 AVX required'
+  exit 1
 }
-
-debug_mongo_pipeline() {
-  # Only output if DEBUG is enabled
-  [ "${DEBUG}" != "true" ] && return
-
-  DESCRIPTION="$1"
-  RAW_OUTPUT="$2"
-  FILTER_TYPE="$3"
-  FILTERED_OUTPUT="$4"
-  FINAL_RESULT="$5"
-
-  # Add blank line before debug output
-  echo ""
-
-  echo "DEBUG: ${DESCRIPTION}"
-  echo "DEBUG: Raw output from ${MONGO_CLIENT}:"
-  echo "===START RAW OUTPUT==="
-  echo "${RAW_OUTPUT}"
-  echo "===END RAW OUTPUT==="
-  echo "DEBUG: Raw output (with escaped characters):"
-  printf '%q\n' "${RAW_OUTPUT}"
-
-  if [ "${FILTER_TYPE}" = "awk" ]
-  then
-    echo "DEBUG: After awk filtering (from first { to first }):"
-  else
-    echo "DEBUG: After grep for '\"ok\"':"
-  fi
-
-  echo "===START ${FILTER_TYPE^^} OUTPUT==="
-  echo "${FILTERED_OUTPUT}"
-  echo "===END ${FILTER_TYPE^^} OUTPUT==="
-  echo "DEBUG: Running through jq..."
-  echo "DEBUG: jq result: '${FINAL_RESULT}'"
-  echo "DEBUG: jq result (with escaped characters):"
-  printf '%q\n' "${FINAL_RESULT}"
+[ -f "${DATA}/db/WiredTiger" ] && [ -f "${DATA}/db/storage.bson" ] || {
+  echo 'ERROR: missing database'
+  exit 1
 }
-
-version_step_upgrade() {
-  # start upgrade
-  echo -e "\nINFO: starting upgrade to ${MONGO_MAJ_MIN}..."
-
-  # starting with 7.0, there is no journal arg
-  case "${MONGO_MAJ_MIN}" in
-    7.0|8.0)
-      JOURNAL=""
-      ;;
-    *)
-      JOURNAL="--journal"
-      ;;
-  esac
-
-  # run repair on db to upgrade
-  #run_db_repair
-
-  # start db
-  echo -n "INFO: starting mongod ${MONGO_VER}..."
-  /tmp/mongod-${MONGO_VER} --fork --dbpath /opt/tplink/EAPController/data/db -pidfilepath /opt/tplink/EAPController/data/mongo.pid --bind_ip 127.0.0.1 ${JOURNAL} --logpath /opt/tplink/EAPController/data/mongodb_upgrade.log || abort_and_rollback
-
-  # make sure MongoDB is running
-  while ! echo 'db.adminCommand( { getParameter: 1, featureCompatibilityVersion: 1 } )' | /tmp/${MONGO_CLIENT} --quiet >/dev/null 2>&1
-  do
-    echo -n "."
-    sleep 1
-  done
-  echo "done"
-
-  # get current compat version
-  if [ "${MONGO_CLIENT}" = "mongosh" ]
-  then
-    # mongosh - filter output to only the JSON (from first { to first }), removing any warnings
-    RAW_OUTPUT="$(/tmp/${MONGO_CLIENT} --quiet --json --eval 'db.adminCommand( { getParameter: 1, featureCompatibilityVersion: 1 } )')"
-    FILTERED_OUTPUT="$(echo "${RAW_OUTPUT}" | awk '/^{/{p=1} p{print; if(/^}/)exit}')"
-    CURRENT_COMPAT_VERSION="$(echo "${FILTERED_OUTPUT}" | jq -r .featureCompatibilityVersion.version)"
-    debug_mongo_pipeline "Running mongosh to get compatibility version" "${RAW_OUTPUT}" "awk" "${FILTERED_OUTPUT}" "${CURRENT_COMPAT_VERSION}"
-  else
-    # mongo client - may output warnings before the result, filter to line containing "ok" which is the result
-    RAW_OUTPUT="$(echo 'db.adminCommand( { getParameter: 1, featureCompatibilityVersion: 1 } )' | /tmp/${MONGO_CLIENT} --quiet)"
-    FILTERED_OUTPUT="$(echo "${RAW_OUTPUT}" | grep -F '"ok"')"
-    CURRENT_COMPAT_VERSION="$(echo "${FILTERED_OUTPUT}" | jq -r .featureCompatibilityVersion.version)"
-    debug_mongo_pipeline "Running mongo client to get compatibility version" "${RAW_OUTPUT}" "grep" "${FILTERED_OUTPUT}" "${CURRENT_COMPAT_VERSION}"
-  fi
-
-  # make sure that the current compat version is correct
-  if [ "${CURRENT_COMPAT_VERSION}" != "${EXPECTED_COMPAT_VERSION}" ]
-  then
-    echo -e "\nERROR: featureCompatibilityVersion is currently ${CURRENT_COMPAT_VERSION}; expected ${EXPECTED_COMPAT_VERSION}; aborting upgrade!"
-
-    # abort and rollback
-    abort_and_rollback
-  fi
-
-  # set compatibility version
-  echo -n "INFO: setting feature compatibility version to ${MONGO_MAJ_MIN}..."
-  if [ "${MONGO_CLIENT}" = "mongosh" ]
-  then
-    # mongosh
-    case "${MONGO_MAJ_MIN}" in
-      7.0|8.0)
-        /tmp/${MONGO_CLIENT} --quiet --json --eval 'db.adminCommand( { setFeatureCompatibilityVersion: "'"${MONGO_MAJ_MIN}"'", confirm: true } )' >/dev/null 2>&1
-      ;;
-      *)
-        /tmp/${MONGO_CLIENT} --quiet --json --eval 'db.adminCommand( { setFeatureCompatibilityVersion: "'"${MONGO_MAJ_MIN}"'" } )' >/dev/null 2>&1
-      ;;
-    esac
-  else
-    # mongo client
-    echo 'db.adminCommand( { setFeatureCompatibilityVersion: "'"${MONGO_MAJ_MIN}"'" } )' | /tmp/${MONGO_CLIENT} --quiet >/dev/null 2>&1
-  fi
-  echo "done"
-
-  # verify new compat version
-  echo -n "INFO: verifying feature compatibility version is now ${MONGO_MAJ_MIN}..."
-  if [ "${MONGO_CLIENT}" = "mongosh" ]
-  then
-    # mongosh - filter output to only the JSON (from first { to first }), removing any warnings
-    RAW_OUTPUT="$(/tmp/${MONGO_CLIENT} --quiet --json --eval 'db.adminCommand( { getParameter: 1, featureCompatibilityVersion: 1 } )')"
-    FILTERED_OUTPUT="$(echo "${RAW_OUTPUT}" | awk '/^{/{p=1} p{print; if(/^}/)exit}')"
-    NEW_COMPAT_VERSION="$(echo "${FILTERED_OUTPUT}" | jq -r .featureCompatibilityVersion.version)"
-    debug_mongo_pipeline "Running mongosh to verify new compatibility version" "${RAW_OUTPUT}" "awk" "${FILTERED_OUTPUT}" "${NEW_COMPAT_VERSION}"
-  else
-    # mongo client - may output warnings before the result, filter to line containing "ok" which is the result
-    RAW_OUTPUT="$(echo 'db.adminCommand( { getParameter: 1, featureCompatibilityVersion: 1 } )' | /tmp/${MONGO_CLIENT} --quiet)"
-    FILTERED_OUTPUT="$(echo "${RAW_OUTPUT}" | grep -F '"ok"')"
-    NEW_COMPAT_VERSION="$(echo "${FILTERED_OUTPUT}" | jq -r .featureCompatibilityVersion.version)"
-    debug_mongo_pipeline "Running mongo client to verify new compatibility version" "${RAW_OUTPUT}" "grep" "${FILTERED_OUTPUT}" "${NEW_COMPAT_VERSION}"
-  fi
-
-  # make sure that the new compat version is correct
-  if [ "${NEW_COMPAT_VERSION}" != "${MONGO_MAJ_MIN}" ]
-  then
-    echo -e "\nERROR: featureCompatibilityVersion was not updated to ${MONGO_MAJ_MIN} as expected; aborting upgrade!"
-
-    # abort and rollback
-    abort_and_rollback
-  else
-    echo "done"
-  fi
-
-  # stop mongodb
-  echo -n "INFO: stopping mongod..."
-  echo 'db.adminCommand( { shutdown: 1 } )' | /tmp/${MONGO_CLIENT} --quiet >/dev/null 2>&1
-
-  # wait for mongodb to stop
-  while pgrep mongod > /dev/null
-  do
-    echo -n "."
-    sleep 1
-  done
-  echo "done"
-
-  # remove pidfile
-  rm /opt/tplink/EAPController/data/mongo.pid || abort_and_rollback
-
-  # upgrade complete
-  echo "INFO: upgrade to ${MONGO_MAJ_MIN} complete!"
+[ ! -s "${DATA}/db/mongod.lock" ] || {
+  echo 'ERROR: database was not shut down cleanly'
+  exit 1
 }
-
-### start of full upgrade cycle
-# verify the system meets the system requirements for MongoDB 8; get the architecture and run the check for the correct architecture
-ARCH="$(uname -m)"
-
-case "${ARCH}" in
-  x86_64)
-    # amd64 checks
-    echo -n "INFO: running hardware prerequisite check for AVX support on ${ARCH} to ensure your system can run MongoDB 8..."
-
-    # check for AVX support
-    if ! grep -qE '^flags.* avx( .*|$)' /proc/cpuinfo
-    then
-      echo -e "\nERROR: your system does not support AVX which is a requirement for MongoDB starting with 5.x; you will not be able to upgrade MongoDB"
-      echo "  See https://github.com/mbentley/docker-omada-controller/blob/master/README.md#your-system-does-not-support-avx-or-armv82-a for details on what exactly this means and your upgrade options"
-      exit 1
-    fi
-    ;;
-  aarch64|aarch64_be|armv8b|armv8l)
-    # arm64 checks (list of 64 bit arm compatible names from `uname -m`: https://stackoverflow.com/a/45125525)
-    echo -n "INFO: running hardware prerequisite check for armv8.2-a support on ${ARCH} to ensure your system can run MongoDB 8..."
-
-    # check for armv8.2-a support
-    if ! grep -qE '^Features.* (fphp|dcpop|sha3|sm3|sm4|asimddp|sha512|sve)( .*|$)' /proc/cpuinfo
-    then
-      # failed armv8.2-a test
-      echo -e "\nERROR: your system does not support the armv8.2-a or later microarchitecture which is a requirement for MongoDB starting with 5.x; you will not be able to upgrade MongoDB"
-      echo "  See https://github.com/mbentley/docker-omada-controller/blob/master/README.md#your-system-does-not-support-avx-or-armv82-a for details on what exactly this means and your upgrade options"
-      exit 1
-    fi
+WT=$(grep -o 'WiredTiger [0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' "${DATA}/db/WiredTiger.turtle" | cut -d' ' -f2)
+case "${WT}" in
+  3.1.0|3.1.1)
     ;;
   *)
-    echo -e "\nERROR: unknown architecture (${ARCH})"
+    echo 'ERROR: expected MongoDB 3.6 WiredTiger'
     exit 1
     ;;
 esac
 
-# prerequisite checks successful
-echo "done"
+ORIGINAL_OWNER=$(stat -c '%u:%g' "${DATA}/db")
+cd "${DATA}"
 
-# verify no lock file exists
-echo -n "INFO: running pre-flight checks on MongoDB..."
+# Never overwrite a previous recovery archive.
+BACKUP=$(mktemp "${DATA}/mongodb-preupgrade.XXXXXXXX.tar")
+tar cf "${BACKUP}" db
+tar tf "${BACKUP}" >/dev/null
+sha256sum "${BACKUP}" > "${BACKUP}.sha256"
 
-# check to see if mongod.lock exists & it is > zero bytes
-if [ -f "/opt/tplink/EAPController/data/db/mongod.lock" ] && [ -s "/opt/tplink/EAPController/data/db/mongod.lock" ]
-then
-  # mongod.lock exists & is > zero bytes
-  echo -e "\nERROR: mongod.lock exists and isn't empty! Either the MongoDB wasn't shut down cleanly or there is another process accessing the persistent data files! Unable to execute upgrade!"
-  # TODO: add instructions for what to do in this case
+rollback() {
+  trap - ERR INT TERM
+  echo 'ERROR: upgrade failed; stopping helper MongoDB before restoring clone'
+  if [ -s "${DATA}/mongo.pid" ]; then
+    PID=$(cat "${DATA}/mongo.pid")
+    if kill -0 "${PID}" 2>/dev/null; then
+      kill -TERM "${PID}" || true
+
+      for ((i = 0; i < WAIT_SECONDS; i++)); do
+        kill -0 "${PID}" 2>/dev/null || break
+        sleep 1
+      done
+
+      if kill -0 "${PID}" 2>/dev/null; then
+        echo 'ERROR: MongoDB did not stop. No restore attempted; preserve backup for manual recovery.'
+        exit 1
+      fi
+    fi
+  fi
+
+  if ! sha256sum -c "${BACKUP}.sha256" || ! tar tf "${BACKUP}" >/dev/null; then
+    echo 'ERROR: backup verification failed; no restore attempted'
+    exit 1
+  fi
+
+  FAILED=$(mktemp -d "${DATA}/mongodb-failed.XXXXXXXX")
+  if mv db "${FAILED}/db" && tar xf "${BACKUP}"; then
+    rm -f "${DATA}/mongo.pid"
+    echo "Restored pre-upgrade clone; failed database retained in ${FAILED}"
+  else
+    echo 'ERROR: restore failed. Recover from independent cold backup.'
+  fi
+
   exit 1
-fi
+}
 
-# check for files known to exist when MongoDB has written data
-if [ ! -f "/opt/tplink/EAPController/data/db/WiredTiger" ] || [ ! -f "/opt/tplink/EAPController/data/db/storage.bson" ]
-then
-  # could not find WiredTiger or a storage.bson
-  echo -e "\nERROR: could not find MongoDB related files in '/opt/tplink/EAPController/data/db' (did you mount 'data' into the container using the same path as you run for the controller?)"
-  exit 1
-fi
+trap rollback ERR INT TERM
 
-# validate WiredTiger version to attempt to match the persistent data to MongoDB 3.6
-WT_VERSION="$(grep -o 'WiredTiger [0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' /opt/tplink/EAPController/data/db/WiredTiger.turtle | cut -d' ' -f2)"
+mongo_eval() {
+  timeout "${WAIT_SECONDS}" "/tmp/${CLIENT}" --quiet --eval "$1"
+}
 
-# validat that we received a value
-if [ -z "${WT_VERSION}" ]
-then
-  echo -e "\nERROR: unable to determine WiredTiger version from /opt/tplink/EAPController/data/db/WiredTiger.turtle; aborting upgrade!"
-  echo "  If you require assistance, create a Help discussion (https://github.com/mbentley/docker-omada-controller/discussions/new?category=help) with as much information as possible"
-  exit 1
-elif [ "${WT_VERSION}" != "3.1.0" ] && [ "${WT_VERSION}" != "3.1.1" ]
-then
-  echo -e "\nERROR: unexpected WiredTiger version (${WT_VERSION}) found in persistent data; expecting 3.1.0 or 3.1.1 for MongoDB 3.6 - aborting upgrade!"
-  echo "  If you require assistance, create a Help discussion (https://github.com/mbentley/docker-omada-controller/discussions/new?category=help) with as much information as possible"
-  exit 1
-fi
+for SPEC in \
+  '4.0.28:3.6' \
+  '4.2.23:4.0' \
+  '4.4.18:4.2' \
+  '5.0.31:4.4' \
+  '6.0.25:5.0' \
+  '7.0.22:6.0' \
+  '8.0.12:7.0'; do
+  VER=${SPEC%:*}
+  EXPECTED=${SPEC#*:}
+  TARGET=${VER%.*}
 
-# pre-flight checks successful
-echo "done"
+  CLIENT=mongo-${VER}
+  case "${TARGET}" in
+    6.0|7.0|8.0)
+      CLIENT=mongosh
+      ;;
+  esac
 
-# take backup before upgrade
-echo -n "INFO: creating a backup (mongodb-preupgrade.tar) of MongoDB pre-upgrade..."
-cd /opt/tplink/EAPController/data || catch_error
-tar cf mongodb-preupgrade.tar db
+  JOURNAL=(--journal)
+  case "${TARGET}" in
+    7.0|8.0)
+      JOURNAL=()
+      ;;
+  esac
 
-# make sure the backup file is a valid tar
-if tar tf mongodb-preupgrade.tar >/dev/null 2>&1
-then
-  # successfully listed the files
-  echo "done"
-else
-  # failed to list contents of tar
-  echo -e "\nERROR: failed to create a backup of MongoDB; aborting upgrade!"
-  exit 1
-fi
+  rm -f "${DATA}/mongo.pid"
+  echo "Upgrading to ${VER}; expecting FCV ${EXPECTED}"
+  timeout "${WAIT_SECONDS}" "/tmp/mongod-${VER}" \
+    --fork \
+    --dbpath "${DATA}/db" \
+    --pidfilepath "${DATA}/mongo.pid" \
+    --bind_ip 127.0.0.1 \
+    --logpath "${DATA}/mongodb_upgrade.log" \
+    --logappend \
+    "${JOURNAL[@]}"
 
-### 3.6 to 4.0
-# set variables
-MONGO_VER="4.0.28"
-MONGO_MAJ_MIN="$(echo "${MONGO_VER}" | awk -F '.' '{print $1"."$2}')"
-MONGO_CLIENT="mongo-${MONGO_VER}"
-EXPECTED_COMPAT_VERSION="3.6"
+  READY=false
+  for ((i = 0; i < WAIT_SECONDS; i++)); do
+    if timeout 2 "/tmp/${CLIENT}" --quiet \
+      --eval 'quit(db.adminCommand({ping:1}).ok === 1 ? 0 : 1)' \
+      >/dev/null 2>&1; then
+      READY=true
+      break
+    fi
+    sleep 1
+  done
 
-# run repair
-run_db_repair "starting MongoDB repair pre-upgrade to ensure consistency"
+  [ "${READY}" = true ]
 
-# output message
-echo -e "\nINFO: executing upgrade process from MongoDB 3.6 to 8.0..."
+  mongo_eval \
+    "if (db.adminCommand({getParameter:1,featureCompatibilityVersion:1}).featureCompatibilityVersion.version !== '${EXPECTED}') quit(1)"
+  CONFIRM=''
+  case "${TARGET}" in
+    7.0|8.0)
+      CONFIRM=',confirm:true'
+      ;;
+  esac
 
-# run upgrade
-version_step_upgrade
+  mongo_eval \
+    "if (db.adminCommand({setFeatureCompatibilityVersion:'${TARGET}'${CONFIRM}}).ok !== 1) quit(1)"
+  mongo_eval \
+    "if (db.adminCommand({getParameter:1,featureCompatibilityVersion:1}).featureCompatibilityVersion.version !== '${TARGET}') quit(1)"
 
+  # Shutdown intentionally closes the shell connection, so verify process exit separately.
+  PID=$(cat "${DATA}/mongo.pid")
+  mongo_eval 'db.adminCommand({shutdown:1})' >/dev/null 2>&1 || true
+  for ((i = 0; i < WAIT_SECONDS; i++)); do
+    kill -0 "${PID}" 2>/dev/null || break
+    sleep 1
+  done
+  ! kill -0 "${PID}" 2>/dev/null
+  rm -f "${DATA}/mongo.pid"
+done
 
-### 4.0 to 4.2
-### upgrade to 4.2
-if [ "$(uname -m)" = "aarch64" ]
-then
-  echo -e "\nINFO: upgrading from libcurl3 to libcurl4..."
-  dpkg -i /libcurl4_7.58.0-2ubuntu3.24_arm64.deb
-  echo "done"
-fi
+trap - ERR INT TERM
 
-# set variables
-MONGO_VER="4.2.23"
-MONGO_MAJ_MIN="$(echo "${MONGO_VER}" | awk -F '.' '{print $1"."$2}')"
-MONGO_CLIENT="mongo-${MONGO_VER}"
-EXPECTED_COMPAT_VERSION="4.0"
+# Keep original database ownership; helper runs as root only during the conversion.
+chown -R "${ORIGINAL_OWNER}" "${DATA}/db"
 
-# run upgrade
-version_step_upgrade
-
-
-### 4.2 to 4.4
-# set variables
-MONGO_VER="4.4.18"
-MONGO_MAJ_MIN="$(echo "${MONGO_VER}" | awk -F '.' '{print $1"."$2}')"
-MONGO_CLIENT="mongo-${MONGO_VER}"
-EXPECTED_COMPAT_VERSION="4.2"
-
-# run upgrade
-version_step_upgrade
-
-
-### 4.4 to 5.0
-# set variables
-MONGO_VER="5.0.31"
-MONGO_MAJ_MIN="$(echo "${MONGO_VER}" | awk -F '.' '{print $1"."$2}')"
-MONGO_CLIENT="mongo-${MONGO_VER}"
-EXPECTED_COMPAT_VERSION="4.4"
-
-# run upgrade
-version_step_upgrade
-
-
-### 5.0 to 6.0
-# set variables
-MONGO_VER="6.0.25"
-MONGO_MAJ_MIN="$(echo "${MONGO_VER}" | awk -F '.' '{print $1"."$2}')"
-MONGO_CLIENT="mongosh"
-EXPECTED_COMPAT_VERSION="5.0"
-
-# run upgrade
-version_step_upgrade
-
-
-### 6.0 to 7.0
-if [ "$(uname -m)" = "aarch64" ]
-then
-  echo -e "\nINFO: upgrading libc6 to support MongoDB 7.x & 8.x..."
-  dpkg -i /libc6_2.31-0ubuntu9.18_arm64.deb
-  dpkg -i /libgcc-s1_10.5.0-1ubuntu1~20.04_arm64.deb /libcrypt1_4.4.10-10ubuntu4_arm64.deb /gcc-10-base_10.5.0-1ubuntu1~20.04_arm64.deb /libc6_2.31-0ubuntu9.18_arm64.deb
-  echo "done"
-fi
-# set variables
-MONGO_VER="7.0.22"
-MONGO_MAJ_MIN="$(echo "${MONGO_VER}" | awk -F '.' '{print $1"."$2}')"
-MONGO_CLIENT="mongosh"
-EXPECTED_COMPAT_VERSION="6.0"
-
-# run upgrade
-version_step_upgrade
-
-
-### 7.0 to 8.0
-# set variables
-MONGO_VER="8.0.12"
-MONGO_MAJ_MIN="$(echo "${MONGO_VER}" | awk -F '.' '{print $1"."$2}')"
-MONGO_CLIENT="mongosh"
-EXPECTED_COMPAT_VERSION="7.0"
-
-# run upgrade
-version_step_upgrade
-
-
-# step upgrades finished
-echo -e "\nINFO: running post-upgrade tasks..."
-
-# set ownership
-echo -n "INFO: fixing ownership of database files..."
-chown -R "$(stat -c "%u:%g" /opt/tplink/EAPController/data/db)" /opt/tplink/EAPController/data
-echo "done"
-
-echo -e "\nINFO: the MongoDB backup file (mongodb-preupgrade.tar) is still in your persistent data directory in case you need to roll back but this can be removed once you have verified your controller is functioning correctly"
-echo "INFO: upgrade process from MongoDB 3.6 to 8.0 was successful!"
+echo "Upgrade complete. Preserve ${BACKUP} and the independent cold backup. Validate a controller on this clone before any cutover."

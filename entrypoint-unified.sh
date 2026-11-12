@@ -45,10 +45,7 @@ setup_environment() {
   # EXTERNAL MONGODB
   MONGO_EXTERNAL="${MONGO_EXTERNAL:-false}"
   EAP_MONGOD_URI="${EAP_MONGOD_URI:-mongodb://127.0.0.1:27217/omada}"
-  # escape & for eval
-  EAP_MONGOD_URI="$(eval echo "${EAP_MONGOD_URI//&/\\&}")"
-  # escape after eval as well for sed
-  EAP_MONGOD_URI="${EAP_MONGOD_URI//&/\\&}"
+
 
   # EXTRA ARGS for embedded MongoDB (appended to every mongod invocation)
   MONGOD_EXTRA_ARGS="${MONGOD_EXTRA_ARGS:-}"
@@ -213,37 +210,25 @@ update_port_configuration() {
 }
 
 update_general_properties() {
-  # update stored property values when different of environment defined values (works for any value)
+  # Literal property replacement: never evaluate a URI or interpolate it into sed.
+  local ELEM KEY VALUE FILE TMP LINE
+  FILE="/opt/tplink/EAPController/properties/omada.properties"
   for ELEM in WEB_CONFIG_OVERRIDE MONGO_EXTERNAL EAP_MONGOD_URI
   do
-    # convert element to key name
-    KEY="$(echo "${ELEM}" | tr '[:upper:]' '[:lower:]' | tr '_' '.')"
-
-    # get the full key & value to store for checking later
-    KEY_VALUE="$(grep "^${KEY}=" /opt/tplink/EAPController/properties/omada.properties || true)"
-
-    # get value we want to set from the element
-    END_VAL=${!ELEM}
-
-    #value with redacted password for EAP_MONGOD_URI for logs
-    END_VAL_REDACTED="$(echo "${!ELEM}" | sed -r 's/(^mongodb:\/\/[^:]*:)([^@]*)(@.*$)/\1*****\3/')"
-
-    # get the current value from the omada.properties file
-    STORED_PROP_VAL=$(grep -Po "(?<=${KEY}=)(.*)+" /opt/tplink/EAPController/properties/omada.properties || true)
-
-    # check to see if we need to set the value; see if there is something in the key/value first
-    if [ -z "${KEY_VALUE}" ]
-    then
-      echo "INFO: Skipping '${KEY}' - not present in omada.properties"
-    elif [ "${STORED_PROP_VAL}" != "${END_VAL}" ]
-    then
-      # update the key-value pair
-      echo "INFO: Setting '${KEY}' to ${END_VAL_REDACTED} in omada.properties"
-      sed -i "s~^${KEY}=${STORED_PROP_VAL}$~${KEY}=${END_VAL}~g" /opt/tplink/EAPController/properties/omada.properties
-    else
-      # values already match; nothing to change
-      echo "INFO: Value of '${KEY}' already set to ${END_VAL_REDACTED} in omada.properties"
-    fi
+    KEY="$(printf '%s' "${ELEM}" | tr '[:upper:]_' '[:lower:].')"
+    VALUE="${!ELEM}"
+    case "${VALUE}" in
+      *$'\n'*|*$'\r'*|*\\*) echo "ERROR: ${ELEM} must be one literal properties line (percent-encode URI special characters)"; exit 1 ;;
+    esac
+    TMP="$(mktemp "${FILE}.XXXXXX")"
+    while IFS= read -r LINE || [ -n "${LINE}" ]; do
+      case "${LINE}" in
+        "${KEY}="*) printf '%s=%s\n' "${KEY}" "${VALUE}" ;;
+        *) printf '%s\n' "${LINE}" ;;
+      esac
+    done < "${FILE}" > "${TMP}"
+    cat "${TMP}" > "${FILE}"
+    rm -f "${TMP}"
   done
 }
 
@@ -800,12 +785,16 @@ setup_mongodb_wrapper() {
 
   echo "INFO: MONGOD_EXTRA_ARGS='${MONGOD_EXTRA_ARGS}'; creating mongod wrapper (real binary: ${MONGOD_REAL})"
 
-  # replace symlink with a wrapper script that appends the extra args
+  # Arguments are whitespace-separated literal tokens; shell syntax is never executed.
+  local -a EXTRA_ARGS
+  read -r -a EXTRA_ARGS <<< "${MONGOD_EXTRA_ARGS}"
   rm -f "${MONGOD_LINK}"
-  cat > "${MONGOD_LINK}" << EOF
-#!/bin/sh
-exec "${MONGOD_REAL}" "\$@" ${MONGOD_EXTRA_ARGS}
-EOF
+  {
+    printf '#!/bin/bash\nexec %q "${@}"' "${MONGOD_REAL}"
+    printf ' %q' "${EXTRA_ARGS[@]}"
+    printf '\n'
+  } > "${MONGOD_LINK}"
+
   chmod +x "${MONGOD_LINK}"
 }
 

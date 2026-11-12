@@ -1,23 +1,26 @@
-# rebased/repackaged base image that only updates existing packages
-FROM mbentley/ubuntu:20.04
+# Isolated amd64 migration helper: use only a disposable cold clone.
+FROM ubuntu:20.04@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214
 LABEL maintainer="Matt Bentley <mbentley@mbentley.net>"
 LABEL org.opencontainers.image.source="https://github.com/mbentley/docker-omada-controller"
 
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update &&\
-  apt-get install --no-install-recommends -y ca-certificates jq libcurl4 wget &&\
+  apt-get install --no-install-recommends -y ca-certificates jq libcurl4 wget procps coreutils &&\
   rm -rf /var/lib/apt/lists/*
 
+COPY SHA256SUMS /SHA256SUMS
+
 RUN cd /tmp &&\
-  wget -q https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu1804-4.0.28.tgz &&\
-  wget -q https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu1804-4.2.23.tgz &&\
-  wget -q https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu1804-4.4.18.tgz &&\
-  wget -q https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2004-5.0.31.tgz &&\
-  wget -q https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2004-6.0.25.tgz &&\
-  wget -q https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2004-7.0.22.tgz &&\
-  wget -q https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2004-8.0.12.tgz &&\
-  wget -q https://downloads.mongodb.com/compass/mongosh-2.3.9-linux-x64.tgz &&\
+  wget -q --https-only --timeout=60 --tries=3 https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu1804-4.0.28.tgz &&\
+  wget -q --https-only --timeout=60 --tries=3 https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu1804-4.2.23.tgz &&\
+  wget -q --https-only --timeout=60 --tries=3 https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu1804-4.4.18.tgz &&\
+  wget -q --https-only --timeout=60 --tries=3 https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2004-5.0.31.tgz &&\
+  wget -q --https-only --timeout=60 --tries=3 https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2004-6.0.25.tgz &&\
+  wget -q --https-only --timeout=60 --tries=3 https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2004-7.0.22.tgz &&\
+  wget -q --https-only --timeout=60 --tries=3 https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2004-8.0.12.tgz &&\
+  wget -q --https-only --timeout=60 --tries=3 https://downloads.mongodb.com/compass/mongosh-2.3.9-linux-x64.tgz &&\
+  sha256sum -c /SHA256SUMS &&\
   tar xvf mongodb-linux-x86_64-ubuntu1804-4.0.28.tgz mongodb-linux-x86_64-ubuntu1804-4.0.28/bin/mongod mongodb-linux-x86_64-ubuntu1804-4.0.28/bin/mongo &&\
   tar xvf mongodb-linux-x86_64-ubuntu1804-4.2.23.tgz mongodb-linux-x86_64-ubuntu1804-4.2.23/bin/mongod mongodb-linux-x86_64-ubuntu1804-4.2.23/bin/mongo &&\
   tar xvf mongodb-linux-x86_64-ubuntu1804-4.4.18.tgz mongodb-linux-x86_64-ubuntu1804-4.4.18/bin/mongod mongodb-linux-x86_64-ubuntu1804-4.4.18/bin/mongo &&\
