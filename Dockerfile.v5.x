@@ -1,16 +1,18 @@
-# rebased/repackaged base image that only updates existing packages
+# Official Ubuntu release; use --pull when rebuilding.
 ARG BASE=ubuntu:20.04
 FROM ${BASE}
 LABEL maintainer="Eugene Volchek <eugene.volchek@gmail.com>"
 LABEL org.opencontainers.image.source="https://github.com/evolchek/docker-omada-controller"
 
-COPY healthcheck.sh install.sh /
+COPY healthcheck.sh install.sh build-inputs.env runtime-properties.sh /
 
-# valid values: amd64 (default) | arm64 | armv7l
-ARG ARCH=amd64
+# The recorded vendor archive supports linux/amd64 only.
+ARG TARGETARCH
+ARG ARCH=${TARGETARCH}
 
-# install version (major.minor or full version); OMADA_URL set in install.sh
+# Exact version must match build-inputs.env.
 ARG INSTALL_VER="5.15.24.19"
+LABEL org.opencontainers.image.version="${INSTALL_VER}"
 ARG NO_MONGODB=false
 
 # install omada controller (instructions taken from install.sh)

@@ -24,10 +24,6 @@ PORT_RTTY="${PORT_RTTY:-29816}"
 # EXTERNAL MONGODB
 MONGO_EXTERNAL="${MONGO_EXTERNAL:-false}"
 EAP_MONGOD_URI="${EAP_MONGOD_URI:-mongodb://127.0.0.1:27217/omada}"
-# escape & for eval
-EAP_MONGOD_URI="$(eval echo "${EAP_MONGOD_URI//&/\\&}")"
-# escape after eval as well for sed
-EAP_MONGOD_URI="${EAP_MONGOD_URI//&/\\&}"
 # END EXTERNAL MONGODB
 
 SHOW_SERVER_LOGS="${SHOW_SERVER_LOGS:-true}"
@@ -138,35 +134,10 @@ do
   fi
 done
 
-# update stored property values when different of environment defined values (works for any value)
-for ELEM in MONGO_EXTERNAL EAP_MONGOD_URI
-do
-  # convert element to key name
-  KEY="$(echo "${ELEM}" | tr '[:upper:]' '[:lower:]' | tr '_' '.')"
-
-  # get the full key & value to store for checking later
-  KEY_VALUE="$(grep "^${KEY}=" /opt/tplink/EAPController/properties/omada.properties || true)"
-
-  # get value we want to set from the element
-  END_VAL=${!ELEM}
-
-  # get the current value from the omada.properties file
-  STORED_PROP_VAL=$(grep -Po "(?<=${KEY}=)(.*)+" /opt/tplink/EAPController/properties/omada.properties || true)
-
-  # check to see if we need to set the value; see if there is something in the key/value first
-  if [ -z "${KEY_VALUE}" ]
-  then
-    echo "INFO: Skipping '${KEY}' - not present in omada.properties"
-  elif [ "${STORED_PROP_VAL}" != "${END_VAL}" ]
-  then
-    # update the key-value pair
-    echo "INFO: Setting '${KEY}' to ${END_VAL} in omada.properties"
-    sed -i "s~^${KEY}=${STORED_PROP_VAL}$~${KEY}=${END_VAL}~g" /opt/tplink/EAPController/properties/omada.properties
-  else
-    # values already match; nothing to change
-    echo "INFO: Value of '${KEY}' already set to ${END_VAL} in omada.properties"
-  fi
-done
+# Update property values literally; never execute connection-string content.
+# shellcheck source=runtime-properties.sh
+source /runtime-properties.sh
+update_general_properties
 
 # Import a cert from a possibly mounted secret or file at /cert
 if [ -f "/cert/${SSL_KEY_NAME}" ] && [ -f "/cert/${SSL_CERT_NAME}" ]

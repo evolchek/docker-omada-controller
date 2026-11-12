@@ -1,0 +1,19 @@
+# Disposable fresh-data smoke test. No host ports, LAN routes, or production volumes.
+services:
+  controller:
+    image: evolchek/omada-controller:5.15.24.19
+    platform: linux/amd64
+    stop_grace_period: 120s
+    environment:
+      TZ: Etc/UTC
+      SHOW_SERVER_LOGS: 'true'
+    volumes:
+      - test-data:/opt/tplink/EAPController/data
+      - test-logs:/opt/tplink/EAPController/logs
+    networks: [isolated]
+networks:
+  isolated:
+    internal: true
+volumes:
+  test-data:
+  test-logs:

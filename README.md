@@ -1,4 +1,87 @@
-# mbentley/omada-controller
+# evolchek/omada-controller
+
+A fork of [mbentley/docker-omada-controller](https://github.com/mbentley/docker-omada-controller) using an official Ubuntu base and an explicit, checksum-verified TP-Link download.
+
+## Differences from upstream
+
+This branch is based on upstream tag [`v5.15.24.19`](https://github.com/mbentley/docker-omada-controller/tree/v5.15.24.19), commit `979230b`. It builds **Omada 5.15.24.19 for linux/amd64**.
+
+| Area | This fork |
+| --- | --- |
+| Base image | Official `ubuntu:20.04` instead of `mbentley/ubuntu:20.04`. Use `--pull` to refresh the base when rebuilding. |
+| Installer | Version-specific amd64 installer. `build-inputs.env` records the exact version, direct TP-Link URL and archive SHA-256; no external URL-resolution service is contacted during builds. |
+| Download verification | HTTPS downloads with timeouts/retries and SHA-256 verification before extraction. The recorded hash pins downloaded bytes; no independent vendor archive signature has been verified. |
+| Runtime | Keeps upstream's separate v5 root and rootless entrypoints. Both use a shared literal property updater instead of evaluating MongoDB URI content as shell code. Newline, carriage-return and backslash property values are rejected. |
+| Permissions | Properties use `0750` directories and `0640` files instead of world-write permissions. Properties, data and logs are initialized for UID/GID 508. Other rootless UIDs require suitably owned writable mounts. |
+| Inventory | Records the controller version, `BUILD_INPUTS.env` and installed OS package versions in `PACKAGES.tsv` under `/opt/tplink/EAPController`. |
+| Tests | Includes URI/property regression checks and an isolated Compose setup using disposable volumes. |
+
+Java remains OpenJDK 17 and the embedded database remains **MongoDB 3.6 from Ubuntu 20.04**, matching upstream v5's database format. Ubuntu packages resolve from signed repositories at build time, so builds are not bit-for-bit reproducible. Save the plain build log and package inventory for traceability.
+
+Ubuntu 20.04 and MongoDB 3.6 are legacy dependencies retained for v5 compatibility. This build is intended as an intermediate v5 upgrade step, rather than a claim of current upstream security maintenance. Review device support, controller release notes and backups before upgrading an existing installation. Changing branches or image tags alone does not make a database compatible with a different MongoDB major version.
+
+## Building this fork
+
+The public image is available on [Docker Hub](https://hub.docker.com/r/evolchek/omada-controller/tags) as `evolchek/omada-controller:5.15.24.19` for **linux/amd64**. The `5.15` and `5.15-amd64` aliases currently point to the same image; `5.15.20.18` preserves the older build.
+
+Build from source:
+
+```sh
+docker build --pull --progress plain --platform linux/amd64 \
+  -t evolchek/omada-controller:5.15.24.19 .
+```
+
+`INSTALL_VER` must match `OMADA_VERSION` in `build-inputs.env`; changing the build argument alone does not select another release. Updating Omada requires updating the version, URL and checksum together. `NO_MONGODB=true` remains available for an external database. Other architectures, beta package layouts and OpenJ9 selection are outside this version-specific installer.
+
+## Running tests
+
+Run from the repository root using a local Docker context, after building the image above or pulling the public image:
+
+```sh
+docker pull --platform linux/amd64 evolchek/omada-controller:5.15.24.19
+```
+
+Tests do not require controller backups or access to managed devices. Functional tests do not replace dependency scanning or a restore rehearsal on target hardware.
+
+### Runtime configuration regressions
+
+```sh
+docker run --rm --platform linux/amd64 --network none \
+  --entrypoint bash -v "$PWD/tests:/tests:ro" \
+  evolchek/omada-controller:5.15.24.19 \
+  /tests/security-regressions.sh
+```
+
+This checks that command-substitution text is not executed, ampersands and other URI characters stay literal, repeated updates work, and property-line injection is rejected.
+
+### Controller startup and restart
+
+The test Compose file uses its own volumes, an internal network and no published ports. Wait for startup before checking health; startup may take several minutes under emulation. The manual health check exits nonzero until the controller is ready.
+
+```sh
+docker compose -p omada-v5-test -f compose.test.yml up -d
+docker compose -p omada-v5-test -f compose.test.yml ps
+docker compose -p omada-v5-test -f compose.test.yml logs --tail 50 controller
+docker compose -p omada-v5-test -f compose.test.yml exec -T controller /healthcheck.sh
+
+# Restart with the same disposable data, wait, then check health again.
+docker compose -p omada-v5-test -f compose.test.yml restart controller
+docker compose -p omada-v5-test -f compose.test.yml exec -T controller /healthcheck.sh
+
+# Remove only this test project's containers, network and volumes.
+docker compose -p omada-v5-test -f compose.test.yml down -v
+```
+
+### Script syntax
+
+```sh
+bash -n install.sh runtime-properties.sh entrypoint-5.x.sh \
+  entrypoint-rootless.sh tests/security-regressions.sh
+```
+
+## Upstream reference documentation
+
+The following reference is retained from the upstream v5 tag. Its published image tags, broader architecture support and general build examples describe **mbentley's images**. Use the fork-specific build and test instructions above for this checkout. Optional Chromium and Kubernetes examples have not been adapted or validated for this fork.
 
 Docker image for [TP-Link Omada Controller](https://www.tp-link.com/us/support/download/omada-software-controller/) to control [TP-Link Omada Hardware](https://www.tp-link.com/en/business-networking/all-omada/)
 
